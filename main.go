@@ -16,7 +16,6 @@ package main
 import (
 	"context"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/base64"
 	"flag"
 	"fmt"
@@ -33,7 +32,6 @@ import (
 	"strings"
 
 	"golang.org/x/oauth2"
-	"golang.org/x/oauth2/authhandler"
 	"golang.org/x/oauth2/endpoints"
 )
 
@@ -106,6 +104,13 @@ var configByHost = map[string]oauth2.Config{
 		ClientSecret: "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",
 		Endpoint:     endpoints.Google,
 		Scopes:       []string{"https://www.googleapis.com/auth/gerritcodereview"}},
+	// https://app.vsaex.visualstudio.com/app/view?clientId=3528d4a6-5442-42de-a7ee-01159c916fd9
+	"dev.azure.com": {
+		ClientID: "3528D4A6-5442-42DE-A7EE-01159C916FD9",
+		Endpoint: oauth2.Endpoint{AuthURL: "https://app.vssps.visualstudio.com/oauth2/authorize", TokenURL: "https://app.vssps.visualstudio.com/oauth2/token"},
+		Scopes:   []string{"vso.code_write"},
+		// server confused by random ports
+		RedirectURL: "https://127.0.0.1:53119"},
 }
 
 var (
@@ -328,6 +333,7 @@ func getToken(c oauth2.Config) (*oauth2.Token, error) {
 		c.RedirectURL = server.URL
 	} else {
 		server = httptest.NewUnstartedServer(handler)
+		server.Listener.Close()
 		url, err := url.Parse(c.RedirectURL)
 		if err != nil {
 			log.Fatalln(err)
@@ -337,34 +343,38 @@ func getToken(c oauth2.Config) (*oauth2.Token, error) {
 			log.Fatalln(err)
 		}
 		server.Listener = l
-		server.Start()
+		if url.Scheme == "https" {
+			server.StartTLS()
+		} else {
+			server.Start()
+		}
 	}
-	defer server.Close()
-	return authhandler.TokenSourceWithPKCE(context.Background(), &c, state, func(authCodeURL string) (code string, state string, err error) {
-		defer server.Close()
-		fmt.Fprintf(os.Stderr, "Please complete authentication in your browser...\n%s\n", authCodeURL)
-		var open string
-		switch runtime.GOOS {
-		case "windows":
-			open = "start"
-		case "darwin":
-			open = "open"
-		default:
-			open = "xdg-open"
-		}
-		// TODO: wait for server to start before opening browser
-		if _, err := exec.LookPath(open); err == nil {
-			err = exec.Command(open, authCodeURL).Run()
-			if err != nil {
-				return "", "", err
-			}
-		}
-		query := <-queries
-		if verbose {
-			fmt.Fprintln(os.Stderr, "query:", query)
-		}
-		return query.Get("code"), query.Get("state"), nil
-	}, generatePKCEParams()).Token()
+	// defer server.Close()
+	authCodeURL := c.AuthCodeURL(state, oauth2.SetAuthURLParam("response_type", "Assertion"))
+	fmt.Fprintf(os.Stderr, "Please complete authentication in your browser...\n%s\n", authCodeURL)
+	var open string
+	switch runtime.GOOS {
+	case "windows":
+		open = "start"
+	case "darwin":
+		open = "open"
+	default:
+		open = "xdg-open"
+	}
+	if _, err := exec.LookPath(open); err == nil {
+		exec.Command(open, authCodeURL).Run()
+	}
+	query := <-queries
+	if verbose {
+		fmt.Fprintln(os.Stderr, "query:", query)
+	}
+	code := query.Get("code")
+	// client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer&client_assertion={0}&grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer&assertion={1}&redirect_uri={2}
+	return c.Exchange(context.Background(), code,
+		oauth2.SetAuthURLParam("grant_type", "urn:ietf:params:oauth:grant-type:jwt-bearer"),
+		oauth2.SetAuthURLParam("assertion", code),
+		oauth2.SetAuthURLParam("client_assertion_type", "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"),
+		oauth2.SetAuthURLParam("client_assertion", "eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiIsIng1dCI6Im9PdmN6NU1fN3AtSGpJS2xGWHo5M3VfVjBabyJ9.eyJjaWQiOiIzNTI4ZDRhNi01NDQyLTQyZGUtYTdlZS0wMTE1OWM5MTZmZDkiLCJjc2kiOiIxN2Y4N2Y1MC1lOWRhLTRjNmQtYTUxNi1jOGE5YTI3MDRjYWMiLCJuYW1laWQiOiIzNTZlY2VjNC02YjkzLTRmMjctYThlMi1jMzEyNzhhZjlhZDIiLCJpc3MiOiJhcHAudnN0b2tlbi52aXN1YWxzdHVkaW8uY29tIiwiYXVkIjoiYXBwLnZzdG9rZW4udmlzdWFsc3R1ZGlvLmNvbSIsIm5iZiI6MTY2NzI5MjQ0NiwiZXhwIjoxODI1MDU4ODQ1fQ.iOhrMuGIyNOrJHHzkcSvkVGx5216i5-HZwEFerU28yTQDDv-0ttSI2n7TQWgAJ2gdrkQnEV4N8cpRVM3o3bmF4rRgxXOHVpY_Fvi_cFE71AMoU-0ilVCfqeFwTi0Z8g7YHR2aalqcV6MkuiLs1UouSOcwUdeDUCD94yHY5puRnje_Zw2vzb68YGlgFAD4dWIw1R00IeocIGpm3Z7TyQazpAj7EhaR2SdCNpVyEMMbjmyxYtSqjF3Fs-Ja_RFqO9RrAi5Ju1xmx_3_ofw207QNq0PzvTGfQLKP3QioCZxjLbHiT8__7vwvRTjWdg1aDnttKt1qRZwec1RfUv15XG9Nw"))
 }
 
 func randomString(n int) string {
@@ -383,18 +393,6 @@ func replaceHost(e oauth2.Endpoint, host string) oauth2.Endpoint {
 	e.AuthURL = strings.Replace(e.AuthURL, url.Host, host, 1)
 	e.TokenURL = strings.Replace(e.TokenURL, url.Host, host, 1)
 	return e
-}
-
-func generatePKCEParams() *authhandler.PKCEParams {
-	verifier := randomString(32)
-	sha := sha256.Sum256([]byte(verifier))
-	challenge := base64.URLEncoding.WithPadding(base64.NoPadding).EncodeToString(sha[:])
-
-	return &authhandler.PKCEParams{
-		Challenge:       challenge,
-		ChallengeMethod: "S256",
-		Verifier:        verifier,
-	}
 }
 
 func urlResolveReference(base, ref string) (string, error) {
