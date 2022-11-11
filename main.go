@@ -133,6 +133,8 @@ func parse(input string) map[string]string {
 
 func main() {
 	flag.BoolVar(&verbose, "verbose", false, "log debug information to stderr")
+	var device bool
+	flag.BoolVar(&device, "device", false, "instead of opening a web browser locally, print a code to enter on another device")
 	flag.Usage = func() {
 		printVersion()
 		fmt.Fprintln(os.Stderr, "usage: git credential-oauth [<options>] <action>")
@@ -207,7 +209,24 @@ func main() {
 		if c.ClientID == "" || c.Endpoint.AuthURL == "" || c.Endpoint.TokenURL == "" {
 			return
 		}
-		token, err := getToken(c)
+		var token *oauth2.Token
+		if device {
+			if c.Endpoint.DeviceAuthURL == "" {
+				fmt.Fprintln(os.Stderr, "host doesn't support device auth")
+				os.Exit(0)
+			}
+			deviceAuth, err := c.DeviceAuth(context.Background())
+			if err != nil {
+				log.Fatalln(err)
+			}
+			if verbose {
+				fmt.Fprintln(os.Stderr, deviceAuth)
+			}
+			fmt.Fprintf(os.Stderr, "Please enter code %s at %s\n", deviceAuth.UserCode, deviceAuth.VerificationURI)
+			token, err = c.Poll(context.Background(), deviceAuth)
+		} else {
+			token, err = getToken(c)
+		}
 		if err != nil {
 			log.Fatalln(err)
 		}
